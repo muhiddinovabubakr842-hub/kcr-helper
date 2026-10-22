@@ -1,0 +1,39 @@
+import test from 'node:test';import assert from 'node:assert/strict';import {JSDOM} from 'jsdom';import vm from 'node:vm';import {readFile} from 'node:fs/promises';
+test('panels drag and resize independently while paper pan and zoom leave document text intact',async()=>{
+ const dom=new JSDOM('<button id="togglePanels"></button><button id="resetPanels"></button><div class="editor-layout"><section class="editor-panel"><button data-panel-drag="form"></button><button data-panel-resize="form"></button><input value="Student"></section><section class="preview-panel"><button data-panel-drag="preview"></button><button data-panel-resize="preview"></button><div class="sheet-viewport"><div class="paper-pan-layer"><div class="paper-wrap"><article id="paper">Physical document</article></div></div></div></section></div><button id="panSheet"></button><button id="zoomOut"></button><button id="zoomIn"></button><input id="sheetZoom"><button id="fitSheet"></button><button id="actualSize"></button>',{url:'https://example.test',runScripts:'outside-only'});
+ const w=dom.window,d=w.document;w.structuredClone=structuredClone;w.matchMedia=()=>({matches:true});w.ResizeObserver=class{observe(){}};
+ const area=d.querySelector('.editor-layout'),viewport=d.querySelector('.sheet-viewport');Object.defineProperties(area,{clientWidth:{value:1200},clientHeight:{value:800}});Object.defineProperties(viewport,{clientWidth:{value:650},clientHeight:{value:560}});
+ vm.runInContext(await readFile('web/workspace.js','utf8'),dom.getInternalVMContext());const api=w.PolyWorkspace;assert.equal(api.state.free,true);
+ function event(el,type,x,y,id=1){const e=new w.Event(type,{bubbles:true,cancelable:true});Object.assign(e,{button:0,pointerId:id,pointerType:'mouse',clientX:x,clientY:y});el.dispatchEvent(e)}
+ const grip=d.querySelector('[data-panel-drag=form]'),originalPreview=JSON.stringify(api.state.panels.preview);
+ // Give the form room to move without changing the other panel.
+ api.changePanel('form',{w:380,h:600});event(grip,'pointerdown',10,10);event(grip,'pointermove',70,50);event(grip,'pointerup',70,50);assert.equal(api.state.panels.form.x,60);assert.equal(api.state.panels.form.y,40);assert.equal(JSON.stringify(api.state.panels.preview),originalPreview);
+ const resize=d.querySelector('[data-panel-resize=form]');event(resize,'pointerdown',0,0);event(resize,'pointermove',80,50);event(resize,'pointerup',80,50);assert.equal(api.state.panels.form.w,460);assert.equal(api.state.panels.form.h,650);
+ const panelsBefore=JSON.stringify(api.state.panels),before=api.state;event(viewport,'pointerdown',100,100);event(viewport,'pointermove',140,130);event(viewport,'pointerup',140,130);assert.equal(api.state.panX,before.panX+40);assert.equal(api.state.panY,before.panY+30);
+ api.zoomAt(1.7,100,100);assert.equal(api.state.zoom,1.7);api.zoomAt(8);assert.equal(api.state.zoom,2);api.zoomAt(.01);assert.equal(api.state.zoom,.25);assert.equal(JSON.stringify(api.state.panels),panelsBefore);assert.equal(d.querySelector('#paper').textContent,'Physical document');assert.equal(d.querySelector('.editor-panel input').value,'Student');
+ d.querySelector('#fitSheet').click();assert(api.state.zoom>=.25&&api.state.zoom<=2);assert(w.localStorage.getItem('pd-panel-layout-v1'));dom.window.close();
+});
+
+for(const nativeDialog of [true,false])test(`fullscreen preview ${nativeDialog?'with native dialog':'with dialog fallback'} keeps the same document and restores workspace`,async()=>{
+ const dom=new JSDOM(`<main><button id="togglePanels"></button><button id="resetPanels"></button><div class="editor-layout"><section class="editor-panel"><input value="Student"></section><section class="preview-panel"><button data-panel-drag="preview"></button><button data-panel-resize="preview"></button><select id="page"><option>1</option><option>2</option></select><button id="panSheet"></button><button id="zoomOut"></button><button id="zoomIn"></button><input id="sheetZoom"><button id="fitSheet"></button><button id="actualSize"></button><button id="openPreview"></button><button id="closePreview" hidden></button><div class="sheet-viewport" tabindex="0"><div class="paper-pan-layer"><div class="paper-wrap"><article id="paper">Physical document</article></div></div></div><button id="word">Word</button></section></div></main><dialog id="previewDialog" aria-label="A4 preview" aria-modal="true"></dialog>`,{url:'https://example.test',runScripts:'outside-only'});
+ const w=dom.window,d=w.document,dialog=d.querySelector('dialog'),area=d.querySelector('.editor-layout'),viewport=d.querySelector('.sheet-viewport'),panel=d.querySelector('.preview-panel'),paper=d.querySelector('#paper'),open=d.querySelector('#openPreview'),close=d.querySelector('#closePreview');
+ w.structuredClone=structuredClone;w.matchMedia=()=>({matches:nativeDialog});w.ResizeObserver=class{observe(){}};
+ Object.defineProperties(area,{clientWidth:{value:1200},clientHeight:{value:800}});Object.defineProperties(viewport,{clientWidth:{get:()=>dialog.open?1000:650},clientHeight:{get:()=>dialog.open?850:560}});
+ let shown=0,closed=0,exports=0;
+ if(nativeDialog){dialog.showModal=()=>{shown++;dialog.setAttribute('open','')};dialog.close=()=>{closed++;dialog.removeAttribute('open');dialog.dispatchEvent(new w.Event('close'))};}
+ d.querySelector('#word').onclick=()=>exports++;
+ d.querySelector('#page').onchange=()=>{paper.textContent='Page 2'};
+ vm.runInContext(await readFile('web/workspace.js','utf8'),dom.getInternalVMContext());const api=w.PolyWorkspace;
+ api.zoomAt(1.2);api.panBy(35,-20);const before=api.state;const originalParent=panel.parentNode;
+ open.focus();open.click();assert.equal(api.state.fullscreen,true);assert.equal(dialog.open,true);assert.equal(panel.parentNode,dialog);assert.equal(d.querySelector('#paper'),paper);assert.equal(d.querySelectorAll('#paper').length,1);assert.equal(d.activeElement,close);assert.equal(d.querySelector('main').inert,true);assert.equal(open.hidden,true);assert.equal(close.hidden,false);
+ assert(api.state.zoom<before.zoom);api.panBy(10,15);d.querySelector('#zoomIn').click();assert.equal(api.state.fullscreen,true);
+ const geometry=JSON.stringify(api.state.panels);api.changePanel('preview',{x:200,w:900});api.applyPanels();assert.equal(JSON.stringify(api.state.panels),geometry);
+ const selector=d.querySelector('#page');selector.value='2';selector.dispatchEvent(new w.Event('change'));d.querySelector('#word').click();assert.equal(paper.textContent,'Page 2');assert.equal(exports,1);
+ // Tab stays in the modal, including the non-native fallback.
+ const last=d.querySelector('#word');last.focus();last.dispatchEvent(new w.KeyboardEvent('keydown',{key:'Tab',bubbles:true,cancelable:true}));assert.equal(d.activeElement,selector);
+ selector.dispatchEvent(new w.KeyboardEvent('keydown',{key:'Tab',shiftKey:true,bubbles:true,cancelable:true}));assert.equal(d.activeElement,last);
+ dialog.dispatchEvent(new w.KeyboardEvent('keydown',{key:'Escape',bubbles:true,cancelable:true}));assert.equal(api.state.fullscreen,false);assert.equal(dialog.open,false);assert.equal(panel.parentNode,originalParent);assert.equal(d.activeElement,open);assert.equal(api.state.zoom,before.zoom);assert.equal(api.state.panX,before.panX);assert.equal(api.state.panY,before.panY);assert.equal(JSON.stringify(api.state.panels),JSON.stringify(before.panels));assert.equal(d.querySelector('main').inert,undefined);assert.equal(d.querySelector('.editor-panel input').value,'Student');assert.equal(paper.textContent,'Page 2');
+ // Closing with the visible button and a native cancel request both restore DOM.
+ open.click();close.click();assert.equal(api.state.fullscreen,false);open.click();dialog.dispatchEvent(new w.Event('cancel',{cancelable:true}));assert.equal(api.state.fullscreen,false);assert.equal(panel.parentNode,originalParent);if(nativeDialog){assert.equal(shown,3);assert.equal(closed,3)}
+ dom.window.close();
+});
